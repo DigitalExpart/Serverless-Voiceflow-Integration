@@ -1,0 +1,27 @@
+{
+  "name": "voiceflow-mongodb-search-api",
+  "version": "1.0.0",
+  "description": "Serverless webhook middleware between Voiceflow and MongoDB Atlas Search",
+  "main": "api/voiceflow/search.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "keywords": [
+    "voiceflow",
+    "mongodb",
+    "atlas-search",
+    "serverless",
+    "vercel",
+    "webhook"
+  ],
+  "dependencies": {
+    "express": "^4.18.2",
+    "mongodb": "^6.3.0"
+  },
+  "engines": {
+    "node": ">=18.x"
+  }
+}
+
+

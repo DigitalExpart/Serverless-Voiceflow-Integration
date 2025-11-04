@@ -1,0 +1,83 @@
+[
+  {
+    "product_id": "prod_001",
+    "name": "MacBook Pro 16-inch",
+    "description": "High-performance laptop with M3 chip, 16GB RAM, and stunning Retina display",
+    "category": "Laptops",
+    "price": 2499.99,
+    "in_stock": true
+  },
+  {
+    "product_id": "prod_002",
+    "name": "Dell XPS 13",
+    "description": "Premium ultrabook with Intel Core i7, 16GB RAM, compact and lightweight design",
+    "category": "Laptops",
+    "price": 1599.99,
+    "in_stock": true
+  },
+  {
+    "product_id": "prod_003",
+    "name": "ThinkPad X1 Carbon",
+    "description": "Business laptop with 14-inch display, exceptional keyboard, long battery life",
+    "category": "Laptops",
+    "price": 1899.99,
+    "in_stock": false
+  },
+  {
+    "product_id": "prod_004",
+    "name": "iPhone 15 Pro",
+    "description": "Flagship smartphone with A17 Pro chip, titanium design, advanced camera system",
+    "category": "Phones",
+    "price": 999.99,
+    "in_stock": true
+  },
+  {
+    "product_id": "prod_005",
+    "name": "Samsung Galaxy S24",
+    "description": "Android smartphone with AI features, excellent display, versatile camera",
+    "category": "Phones",
+    "price": 899.99,
+    "in_stock": true
+  },
+  {
+    "product_id": "prod_006",
+    "name": "iPad Pro 12.9",
+    "description": "Professional tablet with M2 chip, ProMotion display, Apple Pencil support",
+    "category": "Tablets",
+    "price": 1099.99,
+    "in_stock": true
+  },
+  {
+    "product_id": "prod_007",
+    "name": "Sony WH-1000XM5",
+    "description": "Premium wireless headphones with industry-leading noise cancellation",
+    "category": "Audio",
+    "price": 399.99,
+    "in_stock": true
+  },
+  {
+    "product_id": "prod_008",
+    "name": "AirPods Pro 2",
+    "description": "Wireless earbuds with active noise cancellation, spatial audio, USB-C charging",
+    "category": "Audio",
+    "price": 249.99,
+    "in_stock": true
+  },
+  {
+    "product_id": "prod_009",
+    "name": "LG UltraGear Monitor 27 inch",
+    "description": "Gaming monitor with 144Hz refresh rate, 1ms response time, QHD resolution",
+    "category": "Monitors",
+    "price": 399.99,
+    "in_stock": true
+  },
+  {
+    "product_id": "prod_010",
+    "name": "Logitech MX Master 3S",
+    "description": "Wireless mouse with ergonomic design, precise tracking, customizable buttons",
+    "category": "Accessories",
+    "price": 99.99,
+    "in_stock": true
+  }
+]
+

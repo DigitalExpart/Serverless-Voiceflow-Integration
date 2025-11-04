@@ -1,0 +1,25 @@
+{
+  "name": "default",
+  "mappings": {
+    "dynamic": false,
+    "fields": {
+      "name": {
+        "type": "string",
+        "analyzer": "lucene.standard"
+      },
+      "description": {
+        "type": "string",
+        "analyzer": "lucene.standard"
+      },
+      "category": {
+        "type": "string",
+        "analyzer": "lucene.keyword"
+      },
+      "product_id": {
+        "type": "string",
+        "analyzer": "lucene.keyword"
+      }
+    }
+  }
+}
+
