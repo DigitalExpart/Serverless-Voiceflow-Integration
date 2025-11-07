@@ -50,7 +50,7 @@ app.post('/api/voiceflow/search', async (req, res) => {
 
     if (!query || typeof query !== 'string' || query.trim() === '') {
       return res.status(200).json({
-        speech: 'I didn\'t receive a search query. Please tell me what you\'re looking for.',
+        speech: 'Je n\'ai pas reçu de requête de recherche. Veuillez me dire ce que vous cherchez.',
         results: []
       });
     }
@@ -66,9 +66,7 @@ app.post('/api/voiceflow/search', async (req, res) => {
           index: SEARCH_INDEX_NAME,
           text: {
             query: query.trim(),
-            path: {
-              wildcard: '*' // Search across all fields, or specify: ['name', 'description']
-            },
+            path: ['Designation', 'Description', 'Marque', 'Categorie racine', 'Sous-categorie 1', 'Sous-categorie 2', 'Reference'],
             fuzzy: {
               maxEdits: 1,
               prefixLength: 2
@@ -77,14 +75,18 @@ app.post('/api/voiceflow/search', async (req, res) => {
         }
       },
       {
-        $limit: 5
+        $limit: 10
       },
       {
         $project: {
           _id: 0,
-          name: 1,
-          product_id: 1,
-          description: 1,
+          Reference: 1,
+          Designation: 1,
+          Description: 1,
+          Marque: 1,
+          'Categorie racine': 1,
+          'Sous-categorie 1': 1,
+          'Reference du fabricant': 1,
           score: { $meta: 'searchScore' }
         }
       }
@@ -96,22 +98,26 @@ app.post('/api/voiceflow/search', async (req, res) => {
     // Format response for Voiceflow
     if (results.length === 0) {
       return res.status(200).json({
-        speech: `I couldn't find any products matching "${query}". Please try a different search term.`,
+        speech: `Je n'ai trouvé aucun produit correspondant à "${query}". Veuillez essayer un autre terme de recherche.`,
         results: []
       });
     }
 
     // Build speech output
-    const productNames = results.map(product => product.name || 'Unnamed Product');
+    const productNames = results.map(product => product.Designation || product.Reference || 'Produit sans nom');
     const count = results.length;
-    const speech = `I found ${count} product${count > 1 ? 's' : ''}: ${productNames.join(', ')}.`;
+    const speech = `J'ai trouvé ${count} produit${count > 1 ? 's' : ''}: ${productNames.slice(0, 5).join(', ')}${count > 5 ? '...' : ''}.`;
 
     return res.status(200).json({
       speech,
       results: results.map(product => ({
-        name: product.name,
-        product_id: product.product_id,
-        description: product.description,
+        reference: product.Reference,
+        designation: product.Designation,
+        description: product.Description,
+        marque: product.Marque,
+        categorie: product['Categorie racine'],
+        sous_categorie: product['Sous-categorie 1'],
+        reference_fabricant: product['Reference du fabricant'],
         score: product.score
       }))
     });
@@ -121,7 +127,7 @@ app.post('/api/voiceflow/search', async (req, res) => {
 
     // Return friendly error message to Voiceflow
     return res.status(500).json({
-      speech: 'I\'m sorry, I encountered an error while searching. Please try again later.',
+      speech: 'Désolé, j\'ai rencontré une erreur lors de la recherche. Veuillez réessayer plus tard.',
       results: [],
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });

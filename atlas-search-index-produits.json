@@ -1,0 +1,45 @@
+{
+  "name": "default",
+  "mappings": {
+    "dynamic": false,
+    "fields": {
+      "Reference": {
+        "type": "string",
+        "analyzer": "lucene.keyword"
+      },
+      "Designation": {
+        "type": "string",
+        "analyzer": "lucene.french"
+      },
+      "Description": {
+        "type": "string",
+        "analyzer": "lucene.french"
+      },
+      "Marque": {
+        "type": "string",
+        "analyzer": "lucene.standard"
+      },
+      "Categorie racine": {
+        "type": "string",
+        "analyzer": "lucene.french"
+      },
+      "Sous-categorie 1": {
+        "type": "string",
+        "analyzer": "lucene.french"
+      },
+      "Sous-categorie 2": {
+        "type": "string",
+        "analyzer": "lucene.french"
+      },
+      "Sous-categorie 3": {
+        "type": "string",
+        "analyzer": "lucene.french"
+      },
+      "Reference du fabricant": {
+        "type": "string",
+        "analyzer": "lucene.keyword"
+      }
+    }
+  }
+}
+
