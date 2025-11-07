@@ -145,12 +145,132 @@ app.post('/api/voiceflow/search', async (req, res) => {
   }
 });
 
+/**
+ * POST /api/voiceflow/browse
+ * Get all products with category and brand recommendations
+ */
+app.post('/api/voiceflow/browse', async (req, res) => {
+  try {
+    const { category, brand, limit } = req.body;
+    
+    // Connect to MongoDB
+    const { db } = await connectToDatabase();
+    const collection = db.collection(COLLECTION_NAME);
+
+    // Build match criteria
+    const matchCriteria = {};
+    if (category) {
+      matchCriteria['Categorie racine'] = category;
+    }
+    if (brand) {
+      matchCriteria['Marque'] = brand;
+    }
+
+    // Get products with optional filtering
+    const resultLimit = Math.min(parseInt(limit) || 500, 1000);
+    
+    const pipeline = [
+      ...(Object.keys(matchCriteria).length > 0 ? [{ $match: matchCriteria }] : []),
+      { $limit: resultLimit },
+      {
+        $project: {
+          _id: 0,
+          Reference: 1,
+          Designation: 1,
+          Description: 1,
+          Marque: 1,
+          'Categorie racine': 1,
+          'Sous-categorie 1': 1,
+          'Sous-categorie 2': 1,
+          'Reference du fabricant': 1
+        }
+      }
+    ];
+
+    const allProducts = await collection.aggregate(pipeline).toArray();
+
+    // Get category statistics
+    const categoryStats = await collection.aggregate([
+      { $group: { 
+          _id: '$Categorie racine', 
+          count: { $sum: 1 } 
+        } 
+      },
+      { $sort: { count: -1 } },
+      { $limit: 10 }
+    ]).toArray();
+
+    // Get brand statistics
+    const brandStats = await collection.aggregate([
+      { $group: { 
+          _id: '$Marque', 
+          count: { $sum: 1 } 
+        } 
+      },
+      { $sort: { count: -1 } },
+      { $limit: 20 }
+    ]).toArray();
+
+    // Get top 5 recommended products (random sample from results)
+    const topProducts = allProducts
+      .sort(() => 0.5 - Math.random())
+      .slice(0, 5);
+
+    // Build speech
+    const totalCount = allProducts.length;
+    let speech = '';
+    
+    if (category && brand) {
+      speech = `J'ai trouvé ${totalCount} produits ${brand} dans la catégorie ${category}. Voici mes 5 recommandations.`;
+    } else if (category) {
+      speech = `J'ai trouvé ${totalCount} produits dans la catégorie ${category}. Voici mes 5 meilleures recommandations.`;
+    } else if (brand) {
+      speech = `J'ai trouvé ${totalCount} produits de la marque ${brand}. Voici mes 5 meilleures recommandations.`;
+    } else {
+      speech = `Catalogue complet: ${totalCount} produits disponibles. Voici 5 produits recommandés parmi ${categoryStats.length} catégories et ${brandStats.length} marques.`;
+    }
+
+    return res.status(200).json({
+      speech,
+      total_products: totalCount,
+      categories: categoryStats.map(c => ({ name: c._id, count: c.count })),
+      brands: brandStats.map(b => ({ name: b._id, count: b.count })),
+      top_5_recommendations: topProducts.map(product => ({
+        reference: product.Reference,
+        designation: product.Designation,
+        description: product.Description,
+        marque: product.Marque,
+        categorie: product['Categorie racine'],
+        sous_categorie: product['Sous-categorie 1']
+      })),
+      all_products: allProducts.map(product => ({
+        reference: product.Reference,
+        designation: product.Designation,
+        description: product.Description,
+        marque: product.Marque,
+        categorie: product['Categorie racine'],
+        sous_categorie: product['Sous-categorie 1']
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error processing browse request:', error);
+    return res.status(500).json({
+      speech: 'Désolé, j\'ai rencontré une erreur. Veuillez réessayer plus tard.',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
 // Health check endpoint (optional but useful)
 app.get('/api/voiceflow/search', (req, res) => {
   res.status(200).json({
     status: 'ok',
     message: 'Voiceflow-MongoDB Search API is running',
-    endpoint: 'POST /api/voiceflow/search'
+    endpoints: {
+      search: 'POST /api/voiceflow/search',
+      browse: 'POST /api/voiceflow/browse'
+    }
   });
 });
 
