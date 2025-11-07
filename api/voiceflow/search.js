@@ -46,7 +46,7 @@ async function connectToDatabase() {
 app.post('/api/voiceflow/search', async (req, res) => {
   try {
     // Validate incoming query from Voiceflow
-    const { query } = req.body;
+    const { query, limit } = req.body;
 
     if (!query || typeof query !== 'string' || query.trim() === '') {
       return res.status(200).json({
@@ -54,6 +54,9 @@ app.post('/api/voiceflow/search', async (req, res) => {
         results: []
       });
     }
+
+    // Set result limit (default 100, max 500)
+    const resultLimit = Math.min(parseInt(limit) || 100, 500);
 
     // Connect to MongoDB
     const { db } = await connectToDatabase();
@@ -75,7 +78,7 @@ app.post('/api/voiceflow/search', async (req, res) => {
         }
       },
       {
-        $limit: 10
+        $limit: resultLimit
       },
       {
         $project: {
@@ -104,9 +107,17 @@ app.post('/api/voiceflow/search', async (req, res) => {
     }
 
     // Build speech output
-    const productNames = results.map(product => product.Designation || product.Reference || 'Produit sans nom');
     const count = results.length;
-    const speech = `J'ai trouvé ${count} produit${count > 1 ? 's' : ''}: ${productNames.slice(0, 5).join(', ')}${count > 5 ? '...' : ''}.`;
+    let speech;
+    
+    if (count <= 10) {
+      // For 10 or fewer results, list them
+      const productNames = results.map(product => product.Designation || product.Reference || 'Produit sans nom');
+      speech = `J'ai trouvé ${count} produit${count > 1 ? 's' : ''}: ${productNames.slice(0, 5).join(', ')}${count > 5 ? '...' : ''}.`;
+    } else {
+      // For more than 10 results, just give the count
+      speech = `J'ai trouvé ${count} produit${count > 1 ? 's' : ''} correspondant à votre recherche. Vous pouvez affiner votre recherche ou parcourir les résultats.`;
+    }
 
     return res.status(200).json({
       speech,
