@@ -8,7 +8,7 @@
   ],
   "routes": [
     {
-      "src": "/api/voiceflow/search",
+      "src": "/api/voiceflow/(search|browse)",
       "dest": "/api/voiceflow/search.js"
     }
   ],
