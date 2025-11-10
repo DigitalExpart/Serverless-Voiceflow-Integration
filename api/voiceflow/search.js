@@ -74,17 +74,10 @@ app.post('/api/voiceflow/search', async (req, res) => {
       'Reference'
     ];
 
-    const languageConfigs = [
-      { language: 'french', boost: 3 },
-      { language: 'english', boost: 1 }
-    ];
-
-    const buildTextStage = (queryString, { language, boost }) => {
+    const buildTextStage = (queryString, boost) => {
       const textStage = {
         path: searchPaths,
-        query: queryString,
-        language,
-        diacriticSensitive: false
+        query: queryString
       };
 
       if (queryString.length >= 3) {
@@ -101,6 +94,54 @@ app.post('/api/voiceflow/search', async (req, res) => {
       return { text: textStage };
     };
 
+    const translationDictionary = {
+      security: 'sécurité',
+      secure: 'sécurisé',
+      safety: 'sécurité',
+      protection: 'protection',
+      surveillance: 'surveillance',
+      camera: 'caméra',
+      cameras: 'caméras',
+      alarm: 'alarme',
+      alarms: 'alarmes',
+      lock: 'serrure',
+      locks: 'serrures',
+      glass: 'verre',
+      tube: 'tube',
+      tubes: 'tubes',
+      mask: 'masque',
+      masks: 'masques',
+      cleaning: 'nettoyage',
+      disinfectant: 'désinfectant',
+      disinfectants: 'désinfectants'
+    };
+
+    const translatedTokens = trimmedQuery
+      .split(/\s+/)
+      .map(token => {
+        const lower = token.toLowerCase();
+        return translationDictionary[lower] || token;
+      });
+
+    const translatedQuery = translatedTokens.join(' ');
+
+    const queryVariants = new Map();
+    queryVariants.set(trimmedQuery, 3);
+
+    if (normalizedQuery !== trimmedQuery) {
+      queryVariants.set(normalizedQuery, 2);
+    }
+
+    if (translatedQuery !== trimmedQuery) {
+      queryVariants.set(translatedQuery, 2);
+      const normalizedTranslatedQuery = translatedQuery
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+      if (normalizedTranslatedQuery !== translatedQuery) {
+        queryVariants.set(normalizedTranslatedQuery, 1.5);
+      }
+    }
+
     // Connect to MongoDB
     const { db } = await connectToDatabase();
     const collection = db.collection(COLLECTION_NAME);
@@ -111,15 +152,9 @@ app.post('/api/voiceflow/search', async (req, res) => {
         $search: {
           index: SEARCH_INDEX_NAME,
           compound: {
-            should: languageConfigs.flatMap(config => {
-              const stages = [buildTextStage(trimmedQuery, config)];
-
-              if (normalizedQuery !== trimmedQuery) {
-                stages.push(buildTextStage(normalizedQuery, config));
-              }
-
-              return stages;
-            }),
+            should: Array.from(queryVariants.entries()).map(([variant, boost]) =>
+              buildTextStage(variant, boost)
+            ),
             minimumShouldMatch: 1
           }
         }
@@ -181,13 +216,16 @@ app.post('/api/voiceflow/search', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error processing search request:', error);
+    console.error('Error processing search request:', {
+      message: error.message,
+      stack: error.stack
+    });
 
     // Return friendly error message to Voiceflow
     return res.status(500).json({
-      speech: 'Désolé, j\'ai rencontré une erreur lors de la recherche. Veuillez réessayer plus tard.',
+      speech: `Désolé, j'ai rencontré une erreur lors de la recherche${error?.message ? ` : ${error.message}` : ''}. Veuillez réessayer plus tard.`,
       results: [],
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+      error: error?.message
     });
   }
 });
