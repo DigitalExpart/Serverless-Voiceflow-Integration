@@ -60,6 +60,7 @@ app.post('/api/voiceflow/search', async (req, res) => {
 
     // Prepare query variations to better support French accents/diacritics
     const trimmedQuery = query.trim();
+    const lowerCaseQuery = trimmedQuery.toLowerCase();
     const normalizedQuery = trimmedQuery
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '');
@@ -94,6 +95,26 @@ app.post('/api/voiceflow/search', async (req, res) => {
       return { text: textStage };
     };
 
+    const phraseTranslations = [
+      { pattern: /\bglass\s+tubes?\b/gi, replacement: 'tubes en verre' },
+      { pattern: /\bglass\s+tube\b/gi, replacement: 'tube en verre' },
+      { pattern: /\bborosilicate\b/gi, replacement: 'borosilicate' },
+      { pattern: /\bpyrex\b/gi, replacement: 'pyrex' },
+      { pattern: /\bsecurity\s+cameras?\b/gi, replacement: 'caméra de sécurité' },
+      { pattern: /\bsurveillance\s+cameras?\b/gi, replacement: 'caméra de surveillance' },
+      { pattern: /\bsurveillance\b/gi, replacement: 'surveillance' },
+      { pattern: /\bsafety\s+equipment\b/gi, replacement: 'équipement de sécurité' },
+      { pattern: /\bsmart\s+lock\b/gi, replacement: 'serrure connectée' },
+      { pattern: /\bfire\s+alarm\b/gi, replacement: 'alarme incendie' },
+      { pattern: /\bprotective\s+mask\b/gi, replacement: 'masque de protection' },
+      { pattern: /\bprotective\s+gloves?\b/gi, replacement: 'gants de protection' }
+    ];
+
+    let phraseTranslatedQuery = trimmedQuery;
+    for (const { pattern, replacement } of phraseTranslations) {
+      phraseTranslatedQuery = phraseTranslatedQuery.replace(pattern, replacement);
+    }
+
     const translationDictionary = {
       security: 'sécurité',
       secure: 'sécurisé',
@@ -116,7 +137,7 @@ app.post('/api/voiceflow/search', async (req, res) => {
       disinfectants: 'désinfectants'
     };
 
-    const translatedTokens = trimmedQuery
+    const translatedTokens = phraseTranslatedQuery
       .split(/\s+/)
       .map(token => {
         const lower = token.toLowerCase();
@@ -124,6 +145,38 @@ app.post('/api/voiceflow/search', async (req, res) => {
       });
 
     const translatedQuery = translatedTokens.join(' ');
+
+    const keywordExpansions = {
+      glass: ['verre'],
+      tube: ['tube', 'verre'],
+      tubes: ['tubes', 'tube', 'verre'],
+      borosilicate: ['borosilicate'],
+      pyrex: ['pyrex'],
+      security: ['sécurité'],
+      camera: ['caméra', 'sécurité'],
+      cameras: ['caméras', 'sécurité'],
+      alarm: ['alarme', 'sécurité'],
+      alarms: ['alarmes', 'sécurité'],
+      lock: ['serrure'],
+      locks: ['serrures'],
+      cleaning: ['nettoyage', 'désinfection'],
+      disinfectant: ['désinfectant'],
+      surveillance: ['surveillance'],
+      respirator: ['respiratoire'],
+      mask: ['masque'],
+      masks: ['masques'],
+      glove: ['gant'],
+      gloves: ['gants'],
+      safety: ['sécurité']
+    };
+
+    const expansionTokens = new Set();
+    for (const [englishWord, synonyms] of Object.entries(keywordExpansions)) {
+      const wordPattern = new RegExp(`\\b${englishWord}\\b`, 'i');
+      if (wordPattern.test(lowerCaseQuery)) {
+        synonyms.forEach(token => expansionTokens.add(token));
+      }
+    }
 
     const queryVariants = new Map();
     queryVariants.set(trimmedQuery, 3);
@@ -139,6 +192,22 @@ app.post('/api/voiceflow/search', async (req, res) => {
         .replace(/[\u0300-\u036f]/g, '');
       if (normalizedTranslatedQuery !== translatedQuery) {
         queryVariants.set(normalizedTranslatedQuery, 1.5);
+      }
+    }
+
+    if (expansionTokens.size > 0) {
+      const appendedKeywords = Array.from(expansionTokens).join(' ');
+      const expandedQuery = `${translatedQuery} ${appendedKeywords}`.trim();
+      if (!queryVariants.has(expandedQuery)) {
+        queryVariants.set(expandedQuery, 1.5);
+      }
+
+      const expandedNormalizedQuery = expandedQuery
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+
+      if (!queryVariants.has(expandedNormalizedQuery)) {
+        queryVariants.set(expandedNormalizedQuery, 1.25);
       }
     }
 
