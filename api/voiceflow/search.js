@@ -58,6 +58,49 @@ app.post('/api/voiceflow/search', async (req, res) => {
     // Set result limit (default 100, max 500)
     const resultLimit = Math.min(parseInt(limit) || 100, 500);
 
+    // Prepare query variations to better support French accents/diacritics
+    const trimmedQuery = query.trim();
+    const normalizedQuery = trimmedQuery
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+
+    const searchPaths = [
+      'Designation',
+      'Description',
+      'Marque',
+      'Categorie racine',
+      'Sous-categorie 1',
+      'Sous-categorie 2',
+      'Reference'
+    ];
+
+    const languageConfigs = [
+      { language: 'french', boost: 3 },
+      { language: 'english', boost: 1 }
+    ];
+
+    const buildTextStage = (queryString, { language, boost }) => {
+      const textStage = {
+        path: searchPaths,
+        query: queryString,
+        language,
+        diacriticSensitive: false
+      };
+
+      if (queryString.length >= 3) {
+        textStage.fuzzy = {
+          maxEdits: 1,
+          prefixLength: 2
+        };
+      }
+
+      if (boost && boost > 1) {
+        textStage.score = { boost: { value: boost } };
+      }
+
+      return { text: textStage };
+    };
+
     // Connect to MongoDB
     const { db } = await connectToDatabase();
     const collection = db.collection(COLLECTION_NAME);
@@ -67,13 +110,17 @@ app.post('/api/voiceflow/search', async (req, res) => {
       {
         $search: {
           index: SEARCH_INDEX_NAME,
-          text: {
-            query: query.trim(),
-            path: ['Designation', 'Description', 'Marque', 'Categorie racine', 'Sous-categorie 1', 'Sous-categorie 2', 'Reference'],
-            fuzzy: {
-              maxEdits: 1,
-              prefixLength: 2
-            }
+          compound: {
+            should: languageConfigs.flatMap(config => {
+              const stages = [buildTextStage(trimmedQuery, config)];
+
+              if (normalizedQuery !== trimmedQuery) {
+                stages.push(buildTextStage(normalizedQuery, config));
+              }
+
+              return stages;
+            }),
+            minimumShouldMatch: 1
           }
         }
       },
