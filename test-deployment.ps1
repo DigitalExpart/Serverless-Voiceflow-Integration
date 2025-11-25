@@ -8,14 +8,47 @@ Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "Deployment: $BASE_URL" -ForegroundColor Green
 Write-Host ""
 
-# Test 1: Health Check
-Write-Host "Test 1: Health Check (GET)" -ForegroundColor Yellow
+# Test 1: Health Check (GET) - Tests MongoDB Connection
+Write-Host "Test 1: Health Check (GET) - MongoDB Connection Test" -ForegroundColor Yellow
+Write-Host "====================================================" -ForegroundColor Yellow
 try {
     $health = Invoke-RestMethod -Uri "$BASE_URL/api/voiceflow/search" -Method Get
-    Write-Host "✅ Status: OK" -ForegroundColor Green
-    Write-Host ($health | ConvertTo-Json -Depth 10)
+    
+    Write-Host "✅ API Status: $($health.status)" -ForegroundColor Green
+    Write-Host "📡 Message: $($health.message)" -ForegroundColor Cyan
+    Write-Host "🕐 Timestamp: $($health.timestamp)" -ForegroundColor Cyan
+    Write-Host ""
+    
+    # Check MongoDB connection
+    if ($health.mongodb.connected -eq $true) {
+        Write-Host "✅ MongoDB: CONNECTED" -ForegroundColor Green
+        Write-Host "   Database: $($health.mongodb.database)" -ForegroundColor White
+        Write-Host "   Collection: $($health.mongodb.collection)" -ForegroundColor White
+        Write-Host "   Search Index: $($health.mongodb.searchIndex)" -ForegroundColor White
+        if ($health.mongodb.documentCount) {
+            Write-Host "   Documents: $($health.mongodb.documentCount)" -ForegroundColor White
+        }
+    } else {
+        Write-Host "❌ MongoDB: DISCONNECTED" -ForegroundColor Red
+        Write-Host "   Status: $($health.mongodb.status)" -ForegroundColor Yellow
+        if ($health.mongodb.error) {
+            Write-Host "   Error: $($health.mongodb.error)" -ForegroundColor Red
+        }
+        Write-Host ""
+        Write-Host "⚠️  ACTION REQUIRED:" -ForegroundColor Yellow
+        Write-Host "   1. Check environment variables in Vercel dashboard" -ForegroundColor White
+        Write-Host "   2. Verify MongoDB Atlas network access (0.0.0.0/0)" -ForegroundColor White
+        Write-Host "   3. Redeploy after fixing environment variables" -ForegroundColor White
+    }
+    
+    Write-Host ""
+    Write-Host "Full Response:" -ForegroundColor Cyan
+    Write-Host ($health | ConvertTo-Json -Depth 10) -ForegroundColor Gray
 } catch {
     Write-Host "❌ Error: $($_.Exception.Message)" -ForegroundColor Red
+    if ($_.Exception.Response) {
+        Write-Host "   Status Code: $($_.Exception.Response.StatusCode.value__)" -ForegroundColor Yellow
+    }
 }
 Write-Host "`n"
 

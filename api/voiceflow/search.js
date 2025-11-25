@@ -14,34 +14,227 @@ const SEARCH_INDEX_NAME = process.env.SEARCH_INDEX_NAME || 'default';
 // MongoDB client singleton (connection pooling)
 let cachedClient = null;
 let cachedDb = null;
+let connectionPromise = null;
 
 /**
  * Connect to MongoDB with connection pooling
  * Reuses existing connection if available
+ * Handles serverless environment properly
  */
 async function connectToDatabase() {
+  // Return cached connection if available and still connected
   if (cachedClient && cachedDb) {
-    return { client: cachedClient, db: cachedDb };
+    try {
+      // Ping to verify connection is still alive
+      await cachedClient.db('admin').command({ ping: 1 });
+      return { client: cachedClient, db: cachedDb };
+    } catch (error) {
+      // Connection is dead, reset cache
+      console.warn('Cached connection is dead, reconnecting...', error.message);
+      cachedClient = null;
+      cachedDb = null;
+    }
   }
 
-  const client = new MongoClient(MONGO_URI, {
-    maxPoolSize: 10,
-    minPoolSize: 2,
-    serverSelectionTimeoutMS: 5000,
+  // If connection is in progress, wait for it
+  if (connectionPromise) {
+    return connectionPromise;
+  }
+
+  // Start new connection
+  connectionPromise = (async () => {
+    try {
+      // Validate environment variables
+      if (!MONGO_URI || MONGO_URI.includes('username:password') || MONGO_URI.includes('your_')) {
+        throw new Error('MONGO_URI is not properly configured. Please set it in environment variables.');
+      }
+      if (!DB_NAME || DB_NAME === 'your_database_name') {
+        throw new Error('DB_NAME is not properly configured. Please set it in environment variables.');
+      }
+
+      console.log('Connecting to MongoDB...', { 
+        db: DB_NAME, 
+        collection: COLLECTION_NAME,
+        hasUri: !!MONGO_URI 
+      });
+
+      const client = new MongoClient(MONGO_URI, {
+        maxPoolSize: 10,
+        minPoolSize: 1,
+        serverSelectionTimeoutMS: 10000,
+        socketTimeoutMS: 45000,
+        connectTimeoutMS: 10000,
+        retryWrites: true,
+        retryReads: true,
+      });
+
+      // Connect with timeout
+      await Promise.race([
+        client.connect(),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Connection timeout after 10 seconds')), 10000)
+        )
+      ]);
+
+      // Verify connection by pinging
+      await client.db('admin').command({ ping: 1 });
+      
+      const db = client.db(DB_NAME);
+      
+      // Verify database and collection exist
+      const collections = await db.listCollections({ name: COLLECTION_NAME }).toArray();
+      if (collections.length === 0) {
+        console.warn(`Collection "${COLLECTION_NAME}" not found in database "${DB_NAME}"`);
+      }
+
+      console.log('Successfully connected to MongoDB');
+
+      cachedClient = client;
+      cachedDb = db;
+      connectionPromise = null;
+
+      return { client, db };
+    } catch (error) {
+      connectionPromise = null;
+      console.error('MongoDB connection error:', {
+        message: error.message,
+        stack: error.stack,
+        mongoUri: MONGO_URI ? '***configured***' : 'missing',
+        dbName: DB_NAME,
+        collectionName: COLLECTION_NAME
+      });
+      throw new Error(`Failed to connect to MongoDB: ${error.message}`);
+    }
+  })();
+
+  return connectionPromise;
+}
+
+/**
+ * Smart search function: All words must appear in the same product
+ * Searches across multiple columns: Sous-catégorie 1, 2, 3, Désignation, Description, Marque
+ * Returns ALL matching products (no limit)
+ */
+async function smartSearch(collection, query, brand = null) {
+  // Extract keywords from query
+  const keywords = query.toLowerCase().split(/\s+/).filter(word => word.length > 2);
+  
+  if (keywords.length === 0) {
+    return [];
+  }
+
+  // Build search conditions - all keywords must appear somewhere in the product
+  // We'll use $and with $or to ensure all keywords match in the same document
+  const searchFields = [
+    'Sous-categorie 1',
+    'Sous-categorie 2', 
+    'Sous-categorie 3',
+    'Designation',
+    'Description',
+    'Marque'
+  ];
+
+  // Create conditions: each keyword must appear in at least one of the fields
+  const keywordConditions = keywords.map(keyword => ({
+    $or: searchFields.map(field => ({
+      [field]: { $regex: keyword, $options: 'i' }
+    }))
+  }));
+
+  // Build match criteria
+  const matchCriteria = {
+    $and: keywordConditions
+  };
+
+  // Add brand filter if provided
+  if (brand) {
+    matchCriteria['Marque'] = { $regex: brand, $options: 'i' };
+  }
+
+  // Execute search - NO LIMIT, return all results
+  const results = await collection.find(matchCriteria)
+    .toArray();
+
+  return results;
+}
+
+/**
+ * Group results by different criteria for filtering
+ */
+function groupResults(results) {
+  const groups = {
+    brands: {},
+    categories: {},
+    sous_categories: {},
+    materials: {}
+  };
+
+  results.forEach(product => {
+    // Group by brand
+    if (product.Marque) {
+      groups.brands[product.Marque] = (groups.brands[product.Marque] || 0) + 1;
+    }
+
+    // Group by category
+    if (product['Categorie racine']) {
+      groups.categories[product['Categorie racine']] = (groups.categories[product['Categorie racine']] || 0) + 1;
+    }
+
+    // Group by sous-categorie
+    if (product['Sous-categorie 1']) {
+      groups.sous_categories[product['Sous-categorie 1']] = (groups.sous_categories[product['Sous-categorie 1']] || 0) + 1;
+    }
+
+    // Try to extract material from description
+    const description = (product.Description || '').toLowerCase();
+    const materials = ['verre', 'plastique', 'métal', 'acier', 'aluminium', 'borosilicate', 'pyrex'];
+    materials.forEach(material => {
+      if (description.includes(material)) {
+        groups.materials[material] = (groups.materials[material] || 0) + 1;
+      }
+    });
   });
 
-  await client.connect();
-  const db = client.db(DB_NAME);
+  // Convert to arrays and sort by count
+  return {
+    brands: Object.entries(groups.brands)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+,
+    categories: Object.entries(groups.categories)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count),
+    sous_categories: Object.entries(groups.sous_categories)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count),
+    materials: Object.entries(groups.materials)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+  };
+}
 
-  cachedClient = client;
-  cachedDb = db;
-
-  return { client, db };
+/**
+ * Extract brand from query if mentioned
+ */
+function extractBrand(query) {
+  const commonBrands = [
+    'BELLCO', 'THERMO SCIENTIFIC', 'CORNING', 'MERCK', 'TESTO', 
+    'SARTORIUS', 'OXOID', 'DIVERS DUTSCHER', 'SPS MEDICAL', 'HYGIPLUS',
+    'BIOTIUM', 'ZEULAB', 'LIOFILCHEM', 'MACHEREY NAGEL', 'BIOTEM'
+  ];
+  
+  const queryUpper = query.toUpperCase();
+  for (const brand of commonBrands) {
+    if (queryUpper.includes(brand)) {
+      return brand;
+    }
+  }
+  return null;
 }
 
 /**
  * POST /api/voiceflow/search
- * Webhook endpoint for Voiceflow to search MongoDB Atlas
+ * Smart search endpoint with multi-step filtering support
  */
 app.post('/api/voiceflow/search', async (req, res) => {
   try {
@@ -55,8 +248,8 @@ app.post('/api/voiceflow/search', async (req, res) => {
       });
     }
 
-    // Set result limit (default 100, max 500)
-    const resultLimit = Math.min(parseInt(limit) || 100, 500);
+    // No limit - return all results
+    const resultLimit = parseInt(limit) || 999999;
 
     // Prepare query variations to better support French accents/diacritics
     const trimmedQuery = query.trim();
@@ -211,6 +404,11 @@ app.post('/api/voiceflow/search', async (req, res) => {
       }
     }
 
+    console.log('search query received', {
+      trimmedQuery,
+      queryVariants: Array.from(queryVariants.keys())
+    });
+
     // Connect to MongoDB
     const { db } = await connectToDatabase();
     const collection = db.collection(COLLECTION_NAME);
@@ -229,9 +427,6 @@ app.post('/api/voiceflow/search', async (req, res) => {
         }
       },
       {
-        $limit: resultLimit
-      },
-      {
         $project: {
           _id: 0,
           Reference: 1,
@@ -247,7 +442,27 @@ app.post('/api/voiceflow/search', async (req, res) => {
     ];
 
     // Execute search
-    const results = await collection.aggregate(searchPipeline).toArray();
+    let results;
+    try {
+      results = await collection.aggregate(searchPipeline).toArray();
+    } catch (searchError) {
+      console.error('MongoDB search error:', {
+        message: searchError.message,
+        query: trimmedQuery,
+        errorCode: searchError.code
+      });
+      
+      // Check if it's an index error
+      if (searchError.message && searchError.message.includes('index')) {
+        return res.status(500).json({
+          speech: `Erreur de configuration: l'index de recherche "${SEARCH_INDEX_NAME}" n'existe pas ou n'est pas configuré correctement.`,
+          results: [],
+          error: process.env.NODE_ENV === 'development' ? searchError.message : undefined
+        });
+      }
+      
+      throw searchError; // Re-throw to be caught by outer catch
+    }
 
     // Format response for Voiceflow
     if (results.length === 0) {
@@ -264,11 +479,14 @@ app.post('/api/voiceflow/search', async (req, res) => {
     if (count <= 10) {
       // For 10 or fewer results, list them
       const productNames = results.map(product => product.Designation || product.Reference || 'Produit sans nom');
-      speech = `J'ai trouvé ${count} produit${count > 1 ? 's' : ''}: ${productNames.slice(0, 5).join(', ')}${count > 5 ? '...' : ''}.`;
+      speech = `J'ai trouvé ${count} produit${count > 1 ? 's' : ''}: ${productNames.join(', ')}.`;
     } else {
       // For more than 10 results, just give the count
       speech = `J'ai trouvé ${count} produit${count > 1 ? 's' : ''} correspondant à votre recherche. Vous pouvez affiner votre recherche ou parcourir les résultats.`;
     }
+    
+    // Add prompt for follow-up questions to encourage continuous conversation
+    speech += ` Que souhaitez-vous savoir d'autre sur ces produits, ou voulez-vous chercher autre chose?`;
 
     return res.status(200).json({
       speech,
@@ -300,6 +518,510 @@ app.post('/api/voiceflow/search', async (req, res) => {
 });
 
 /**
+ * Handle search results based on count
+ */
+function handleSearchResults(results, query, brand, res) {
+  const count = results.length;
+
+  // No results
+  if (count === 0) {
+    return res.status(200).json({
+      step: 'no_results',
+      speech: `Je n'ai trouvé aucun produit correspondant à "${query}"${brand ? ` de la marque ${brand}` : ''}. Pouvez-vous reformuler votre recherche ou essayer d'autres mots-clés?`,
+      results: [],
+      suggestions: [
+        'Essayez des mots-clés plus généraux',
+        'Vérifiez l\'orthographe',
+        'Essayez une autre marque',
+        'Utilisez des synonymes'
+      ]
+    });
+  }
+
+  // 1-5 results: show directly
+  if (count <= 5) {
+    const formattedResults = results.map(product => ({
+      reference: product.Reference,
+      brand: product.Marque,
+      designation: product.Designation
+    }));
+
+    return res.status(200).json({
+      step: 'final',
+      speech: `J'ai trouvé ${count} produit${count > 1 ? 's' : ''} correspondant à votre recherche${brand ? ` de la marque ${brand}` : ''}.`,
+      results: formattedResults,
+      total_count: count
+    });
+  }
+
+  // More than 5 results: group and ask for filter
+  const groups = groupResults(results);
+
+  // Build filter options message
+  let filterMessage = `J'ai trouvé ${count} produits. Pour affiner la recherche, choisissez un filtre:\n\n`;
+  
+  if (groups.brands.length > 0) {
+    filterMessage += `**Marques:** ${groups.brands.map(b => `${b.name} (${b.count})`).join(', ')}\n`;
+  }
+  if (groups.categories.length > 0) {
+    filterMessage += `**Catégories:** ${groups.categories.map(c => `${c.name} (${c.count})`).join(', ')}\n`;
+  }
+  if (groups.sous_categories.length > 0) {
+    filterMessage += `**Sous-catégories:** ${groups.sous_categories.map(s => `${s.name} (${s.count})`).join(', ')}\n`;
+  }
+
+  return res.status(200).json({
+    step: 'needs_filter',
+    speech: filterMessage,
+    results: [],
+    filters: {
+      brands: groups.brands,
+      categories: groups.categories,
+      sous_categories: groups.sous_categories,
+      materials: groups.materials
+    },
+    total_count: count,
+    original_query: query,
+    brand: brand
+  });
+}
+
+/**
+ * POST /api/voiceflow/smart-search
+ * Smart search with multi-step filtering support
+ * Implements: query → ask for brand → search → filter if >5 results → show max 5
+ */
+app.post('/api/voiceflow/smart-search', async (req, res) => {
+  try {
+    const { query, brand, filter_type, filter_value, step } = req.body;
+
+    // Step 1: Initial query - ask for brand if not provided
+    if (step === 'initial' || !step) {
+      if (!query || typeof query !== 'string' || query.trim() === '') {
+        return res.status(200).json({
+          step: 'initial',
+          speech: 'Je n\'ai pas reçu de requête de recherche. Veuillez me dire ce que vous cherchez.',
+          results: [],
+          needs_brand: false
+        });
+      }
+
+      const extractedBrand = extractBrand(query);
+      const queryWithoutBrand = query.replace(new RegExp(extractedBrand || '', 'gi'), '').trim();
+
+      // Search first WITHOUT requiring brand (more flexible)
+      // Brand is optional - we'll search with or without it
+      let db, collection;
+      try {
+        const connection = await connectToDatabase();
+        db = connection.db;
+        collection = db.collection(COLLECTION_NAME);
+      } catch (connectionError) {
+        console.error('MongoDB connection failed:', connectionError);
+        return res.status(500).json({
+          speech: 'Désolé, je ne peux pas me connecter à la base de données. Veuillez réessayer plus tard.',
+          results: [],
+          error: process.env.NODE_ENV === 'development' ? connectionError.message : undefined
+        });
+      }
+
+      // Search WITHOUT brand first (more flexible)
+      let results = await smartSearch(collection, queryWithoutBrand || query, null, 100);
+      
+      // If smart search returns no results, try with Atlas Search (more powerful)
+      if (results.length === 0) {
+        try {
+          const searchQuery = translateQuery(queryWithoutBrand || query);
+          const searchPaths = ['Designation', 'Description', 'Marque', 'Categorie racine', 'Sous-categorie 1', 'Sous-categorie 2', 'Reference'];
+          
+          const searchPipeline = [
+            {
+              $search: {
+                index: SEARCH_INDEX_NAME,
+                text: {
+                  query: searchQuery,
+                  path: searchPaths
+                }
+              }
+            }
+          ];
+          
+          results = await collection.aggregate(searchPipeline).toArray();
+          console.log(`Atlas Search found ${results.length} results for "${searchQuery}"`);
+        } catch (atlasError) {
+          console.warn('Atlas Search fallback failed:', atlasError.message);
+          // Continue with empty results
+        }
+      }
+      
+      // Handle results based on count (will show filters if >5, or results if ≤5)
+      return handleSearchResults(results, query, extractedBrand, res);
+    }
+
+    // Step 2: Search with brand provided
+    if (step === 'search_with_brand') {
+      let db, collection;
+      try {
+        const connection = await connectToDatabase();
+        db = connection.db;
+        collection = db.collection(COLLECTION_NAME);
+      } catch (connectionError) {
+        console.error('MongoDB connection failed:', connectionError);
+        return res.status(500).json({
+          speech: 'Désolé, je ne peux pas me connecter à la base de données. Veuillez réessayer plus tard.',
+          results: [],
+          error: process.env.NODE_ENV === 'development' ? connectionError.message : undefined
+        });
+      }
+
+      let results = await smartSearch(collection, query, brand, 100);
+      
+      // If no results, try without brand filter
+      if (results.length === 0 && brand) {
+        results = await smartSearch(collection, query, null, 100);
+      }
+      
+      // If still no results, use Atlas Search as fallback
+      if (results.length === 0) {
+        try {
+          const searchPaths = ['Designation', 'Description', 'Marque', 'Categorie racine', 'Sous-categorie 1', 'Sous-categorie 2', 'Reference'];
+          const searchPipeline = [
+            {
+              $search: {
+                index: SEARCH_INDEX_NAME,
+                text: {
+                  query: translateQuery(query),
+                  path: searchPaths
+                }
+              }
+            }
+          ];
+          
+          if (brand) {
+            searchPipeline.push({
+              $match: { 'Marque': { $regex: brand, $options: 'i' } }
+            });
+          }
+          
+          results = await collection.aggregate(searchPipeline).toArray();
+        } catch (atlasError) {
+          console.warn('Atlas Search fallback failed:', atlasError.message);
+        }
+      }
+      
+      return handleSearchResults(results, query, brand, res);
+    }
+
+    // Step 3: Apply filter
+    if (step === 'apply_filter') {
+      let db, collection;
+      try {
+        const connection = await connectToDatabase();
+        db = connection.db;
+        collection = db.collection(COLLECTION_NAME);
+      } catch (connectionError) {
+        console.error('MongoDB connection failed:', connectionError);
+        return res.status(500).json({
+          speech: 'Désolé, je ne peux pas me connecter à la base de données. Veuillez réessayer plus tard.',
+          results: [],
+          error: process.env.NODE_ENV === 'development' ? connectionError.message : undefined
+        });
+      }
+      
+      // Re-search with filter
+      let results = await smartSearch(collection, query, brand, 100);
+      
+      // Apply filter
+      if (filter_type === 'brand') {
+        results = results.filter(p => p.Marque && p.Marque.toLowerCase().includes(filter_value.toLowerCase()));
+      } else if (filter_type === 'category') {
+        results = results.filter(p => p['Categorie racine'] && p['Categorie racine'].toLowerCase().includes(filter_value.toLowerCase()));
+      } else if (filter_type === 'sous_categorie') {
+        results = results.filter(p => p['Sous-categorie 1'] && p['Sous-categorie 1'].toLowerCase().includes(filter_value.toLowerCase()));
+      }
+
+      return handleSearchResults(results, query, brand, res);
+    }
+
+    return res.status(400).json({
+      speech: 'Étape non reconnue. Veuillez réessayer.',
+      results: []
+    });
+
+  } catch (error) {
+    console.error('Error in smart search:', error);
+    return res.status(500).json({
+      speech: 'Désolé, j\'ai rencontré une erreur lors de la recherche. Veuillez réessayer plus tard.',
+      results: [],
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
+ * Smart search function: All words must appear in the same product
+ * Searches across multiple columns: Sous-catégorie 1, 2, 3, Désignation, Description, Marque
+ */
+/**
+ * Translate common English terms to French
+ */
+function translateQuery(query) {
+  const translations = {
+    'test tube': 'tube à essai',
+    'test tubes': 'tubes à essai',
+    'glass tube': 'tube en verre',
+    'glass tubes': 'tubes en verre',
+    'borosilicate': 'borosilicate',
+    'borosilicate glass': 'verre borosilicate',
+    'testing tube': 'tube à essai',
+    'testing tubes': 'tubes à essai'
+  };
+  
+  const queryLower = query.toLowerCase();
+  for (const [english, french] of Object.entries(translations)) {
+    if (queryLower.includes(english)) {
+      return query.replace(new RegExp(english, 'gi'), french);
+    }
+  }
+  return query;
+}
+
+async function smartSearch(collection, query, brand = null) {
+  // Translate common terms
+  const translatedQuery = translateQuery(query);
+  
+  // Extract keywords from query
+  let keywords = translatedQuery.toLowerCase().split(/\s+/).filter(word => word.length > 2);
+  
+  if (keywords.length === 0) {
+    return [];
+  }
+
+  // Build search conditions - try strict first (all keywords), then fallback to any keyword
+  const searchFields = [
+    'Sous-categorie 1',
+    'Sous-categorie 2', 
+    'Sous-categorie 3',
+    'Designation',
+    'Description',
+    'Marque',
+    'Categorie racine'
+  ];
+
+  // Try strict search first: all keywords must appear
+  const keywordConditions = keywords.map(keyword => ({
+    $or: searchFields.map(field => ({
+      [field]: { $regex: keyword, $options: 'i' }
+    }))
+  }));
+
+  let matchCriteria = {
+    $and: keywordConditions
+  };
+
+  // Add brand filter if provided
+  if (brand) {
+    matchCriteria['Marque'] = { $regex: brand, $options: 'i' };
+  }
+
+  // Execute strict search - NO LIMIT
+  let results = await collection.find(matchCriteria)
+    .toArray();
+
+  // If no results with strict search, try relaxed search (any keyword matches)
+  if (results.length === 0 && keywords.length > 1) {
+    const relaxedConditions = {
+      $or: keywords.flatMap(keyword =>
+        searchFields.map(field => ({
+          [field]: { $regex: keyword, $options: 'i' }
+        }))
+      )
+    };
+
+    if (brand) {
+      matchCriteria = {
+        $and: [
+          relaxedConditions,
+          { 'Marque': { $regex: brand, $options: 'i' } }
+        ]
+      };
+    } else {
+      matchCriteria = relaxedConditions;
+    }
+
+    results = await collection.find(matchCriteria)
+      .toArray();
+  }
+
+  // If still no results, try single keyword search
+  if (results.length === 0 && keywords.length > 0) {
+    const mainKeyword = keywords[0]; // Use the most important keyword
+    matchCriteria = {
+      $or: searchFields.map(field => ({
+        [field]: { $regex: mainKeyword, $options: 'i' }
+      }))
+    };
+
+    if (brand) {
+      matchCriteria = {
+        $and: [
+          matchCriteria,
+          { 'Marque': { $regex: brand, $options: 'i' } }
+        ]
+      };
+    }
+
+    results = await collection.find(matchCriteria)
+      .toArray();
+  }
+
+  return results;
+}
+
+/**
+ * Group results by different criteria for filtering
+ */
+function groupResults(results) {
+  const groups = {
+    brands: {},
+    categories: {},
+    sous_categories: {},
+    materials: {}
+  };
+
+  results.forEach(product => {
+    // Group by brand
+    if (product.Marque) {
+      groups.brands[product.Marque] = (groups.brands[product.Marque] || 0) + 1;
+    }
+
+    // Group by category
+    if (product['Categorie racine']) {
+      groups.categories[product['Categorie racine']] = (groups.categories[product['Categorie racine']] || 0) + 1;
+    }
+
+    // Group by sous-categorie
+    if (product['Sous-categorie 1']) {
+      groups.sous_categories[product['Sous-categorie 1']] = (groups.sous_categories[product['Sous-categorie 1']] || 0) + 1;
+    }
+
+    // Try to extract material from description
+    const description = (product.Description || '').toLowerCase();
+    const materials = ['verre', 'plastique', 'métal', 'acier', 'aluminium', 'borosilicate', 'pyrex'];
+    materials.forEach(material => {
+      if (description.includes(material)) {
+        groups.materials[material] = (groups.materials[material] || 0) + 1;
+      }
+    });
+  });
+
+  // Convert to arrays and sort by count
+  return {
+    brands: Object.entries(groups.brands)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+,
+    categories: Object.entries(groups.categories)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count),
+    sous_categories: Object.entries(groups.sous_categories)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count),
+    materials: Object.entries(groups.materials)
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count)
+  };
+}
+
+/**
+ * Extract brand from query if mentioned
+ */
+function extractBrand(query) {
+  const commonBrands = [
+    'BELLCO', 'THERMO SCIENTIFIC', 'CORNING', 'MERCK', 'TESTO', 
+    'SARTORIUS', 'OXOID', 'DIVERS DUTSCHER', 'SPS MEDICAL', 'HYGIPLUS',
+    'BIOTIUM', 'ZEULAB', 'LIOFILCHEM', 'MACHEREY NAGEL', 'BIOTEM'
+  ];
+  
+  const queryUpper = query.toUpperCase();
+  for (const brand of commonBrands) {
+    if (queryUpper.includes(brand)) {
+      return brand;
+    }
+  }
+  return null;
+}
+
+/**
+ * Handle search results based on count
+ */
+function handleSearchResults(results, query, brand, res) {
+  const count = results.length;
+
+  // No results
+  if (count === 0) {
+    return res.status(200).json({
+      step: 'no_results',
+      speech: `Je n'ai trouvé aucun produit correspondant à "${query}"${brand ? ` de la marque ${brand}` : ''}. Pouvez-vous reformuler votre recherche ou essayer d'autres mots-clés?`,
+      results: [],
+      suggestions: [
+        'Essayez des mots-clés plus généraux',
+        'Vérifiez l\'orthographe',
+        'Essayez une autre marque',
+        'Utilisez des synonymes'
+      ]
+    });
+  }
+
+  // 1-5 results: show directly
+  if (count <= 5) {
+    const formattedResults = results.map(product => ({
+      reference: product.Reference,
+      brand: product.Marque,
+      designation: product.Designation
+    }));
+
+    return res.status(200).json({
+      step: 'final',
+      speech: `J'ai trouvé ${count} produit${count > 1 ? 's' : ''} correspondant à votre recherche${brand ? ` de la marque ${brand}` : ''}.`,
+      results: formattedResults,
+      total_count: count
+    });
+  }
+
+  // More than 5 results: group and ask for filter
+  const groups = groupResults(results);
+
+  // Build filter options message
+  let filterMessage = `J'ai trouvé ${count} produits. Pour affiner la recherche, choisissez un filtre:\n\n`;
+  
+  if (groups.brands.length > 0) {
+    filterMessage += `**Marques:** ${groups.brands.map(b => `${b.name} (${b.count})`).join(', ')}\n`;
+  }
+  if (groups.categories.length > 0) {
+    filterMessage += `**Catégories:** ${groups.categories.map(c => `${c.name} (${c.count})`).join(', ')}\n`;
+  }
+  if (groups.sous_categories.length > 0) {
+    filterMessage += `**Sous-catégories:** ${groups.sous_categories.map(s => `${s.name} (${s.count})`).join(', ')}\n`;
+  }
+
+  return res.status(200).json({
+    step: 'needs_filter',
+    speech: filterMessage,
+    results: [],
+    filters: {
+      brands: groups.brands,
+      categories: groups.categories,
+      sous_categories: groups.sous_categories,
+      materials: groups.materials
+    },
+    total_count: count,
+    original_query: query,
+    brand: brand
+  });
+}
+
+/**
  * POST /api/voiceflow/browse
  * Get all products with category and brand recommendations
  */
@@ -308,8 +1030,23 @@ app.post('/api/voiceflow/browse', async (req, res) => {
     const { category, brand, limit } = req.body;
     
     // Connect to MongoDB
-    const { db } = await connectToDatabase();
-    const collection = db.collection(COLLECTION_NAME);
+    let db, collection;
+    try {
+      const connection = await connectToDatabase();
+      db = connection.db;
+      collection = db.collection(COLLECTION_NAME);
+    } catch (connectionError) {
+      console.error('MongoDB connection failed in browse:', connectionError);
+      return res.status(500).json({
+        speech: 'Désolé, je ne peux pas me connecter à la base de données. Veuillez réessayer plus tard.',
+        total_products: 0,
+        categories: [],
+        brands: [],
+        top_5_recommendations: [],
+        all_products: [],
+        error: process.env.NODE_ENV === 'development' ? connectionError.message : undefined
+      });
+    }
 
     // Build match criteria
     const matchCriteria = {};
@@ -320,12 +1057,11 @@ app.post('/api/voiceflow/browse', async (req, res) => {
       matchCriteria['Marque'] = brand;
     }
 
-    // Get products with optional filtering
-    const resultLimit = Math.min(parseInt(limit) || 500, 1000);
+    // Get products with optional filtering - NO LIMIT
+    const resultLimit = parseInt(limit) || 999999;
     
     const pipeline = [
       ...(Object.keys(matchCriteria).length > 0 ? [{ $match: matchCriteria }] : []),
-      { $limit: resultLimit },
       {
         $project: {
           _id: 0,
@@ -341,34 +1077,45 @@ app.post('/api/voiceflow/browse', async (req, res) => {
       }
     ];
 
-    const allProducts = await collection.aggregate(pipeline).toArray();
+    let allProducts, categoryStats, brandStats;
+    try {
+      allProducts = await collection.aggregate(pipeline).toArray();
 
-    // Get category statistics
-    const categoryStats = await collection.aggregate([
-      { $group: { 
-          _id: '$Categorie racine', 
-          count: { $sum: 1 } 
-        } 
-      },
-      { $sort: { count: -1 } },
-      { $limit: 10 }
-    ]).toArray();
+      // Get category statistics - ALL categories
+      categoryStats = await collection.aggregate([
+        { $group: { 
+            _id: '$Categorie racine', 
+            count: { $sum: 1 } 
+          } 
+        },
+        { $sort: { count: -1 } }
+      ]).toArray();
 
-    // Get brand statistics
-    const brandStats = await collection.aggregate([
-      { $group: { 
-          _id: '$Marque', 
-          count: { $sum: 1 } 
-        } 
-      },
-      { $sort: { count: -1 } },
-      { $limit: 20 }
-    ]).toArray();
+      // Get brand statistics - ALL brands
+      brandStats = await collection.aggregate([
+        { $group: { 
+            _id: '$Marque', 
+            count: { $sum: 1 } 
+          } 
+        },
+        { $sort: { count: -1 } }
+      ]).toArray();
+    } catch (queryError) {
+      console.error('MongoDB query error in browse:', queryError);
+      return res.status(500).json({
+        speech: 'Désolé, une erreur s\'est produite lors de la récupération des produits. Veuillez réessayer plus tard.',
+        total_products: 0,
+        categories: [],
+        brands: [],
+        top_5_recommendations: [],
+        all_products: [],
+        error: process.env.NODE_ENV === 'development' ? queryError.message : undefined
+      });
+    }
 
-    // Get top 5 recommended products (random sample from results)
+    // Get all products (shuffled for variety)
     const topProducts = allProducts
-      .sort(() => 0.5 - Math.random())
-      .slice(0, 5);
+      .sort(() => 0.5 - Math.random());
 
     // Build speech
     const totalCount = allProducts.length;
@@ -416,16 +1163,340 @@ app.post('/api/voiceflow/browse', async (req, res) => {
   }
 });
 
-// Health check endpoint (optional but useful)
-app.get('/api/voiceflow/search', (req, res) => {
-  res.status(200).json({
+/**
+ * POST /api/voiceflow/add-product
+ * Add a single product to MongoDB
+ */
+app.post('/api/voiceflow/add-product', async (req, res) => {
+  try {
+    const product = req.body;
+
+    // Validate required fields
+    if (!product.Reference) {
+      return res.status(400).json({
+        success: false,
+        message: 'Reference is required',
+        error: 'Missing required field: Reference'
+      });
+    }
+
+    if (!product.Designation) {
+      return res.status(400).json({
+        success: false,
+        message: 'Designation is required',
+        error: 'Missing required field: Designation'
+      });
+    }
+
+    // Connect to MongoDB
+    let db, collection;
+    try {
+      const connection = await connectToDatabase();
+      db = connection.db;
+      collection = db.collection(COLLECTION_NAME);
+    } catch (connectionError) {
+      console.error('MongoDB connection failed:', connectionError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to connect to database',
+        error: process.env.NODE_ENV === 'development' ? connectionError.message : undefined
+      });
+    }
+
+    // Check if product with same Reference already exists
+    const existing = await collection.findOne({ Reference: product.Reference });
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: `Product with Reference "${product.Reference}" already exists`,
+        error: 'Duplicate Reference',
+        existing_product: {
+          reference: existing.Reference,
+          designation: existing.Designation
+        }
+      });
+    }
+
+    // Insert product
+    const result = await collection.insertOne(product);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Product added successfully',
+      product_id: result.insertedId,
+      reference: product.Reference,
+      designation: product.Designation
+    });
+
+  } catch (error) {
+    console.error('Error adding product:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to add product',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
+ * POST /api/voiceflow/add-products
+ * Add multiple products to MongoDB (bulk insert)
+ */
+app.post('/api/voiceflow/add-products', async (req, res) => {
+  try {
+    const { products } = req.body;
+
+    if (!products || !Array.isArray(products)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Products array is required',
+        error: 'Request body must contain "products" array'
+      });
+    }
+
+    if (products.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Products array is empty',
+        error: 'At least one product is required'
+      });
+    }
+
+    // Validate each product
+    const errors = [];
+    products.forEach((product, index) => {
+      if (!product.Reference) {
+        errors.push(`Product ${index + 1}: Missing Reference`);
+      }
+      if (!product.Designation) {
+        errors.push(`Product ${index + 1}: Missing Designation`);
+      }
+    });
+
+    if (errors.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Validation errors',
+        errors: errors
+      });
+    }
+
+    // Connect to MongoDB
+    let db, collection;
+    try {
+      const connection = await connectToDatabase();
+      db = connection.db;
+      collection = db.collection(COLLECTION_NAME);
+    } catch (connectionError) {
+      console.error('MongoDB connection failed:', connectionError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to connect to database',
+        error: process.env.NODE_ENV === 'development' ? connectionError.message : undefined
+      });
+    }
+
+    // Insert products (skip duplicates)
+    const result = await collection.insertMany(products, { ordered: false });
+
+    return res.status(201).json({
+      success: true,
+      message: `Successfully added ${result.insertedCount} product(s)`,
+      inserted_count: result.insertedCount,
+      total_requested: products.length,
+      skipped: products.length - result.insertedCount,
+      inserted_ids: Object.values(result.insertedIds)
+    });
+
+  } catch (error) {
+    console.error('Error adding products:', error);
+    
+    // Handle bulk write errors
+    if (error.writeErrors) {
+      return res.status(207).json({
+        success: true,
+        message: 'Some products were added, some failed',
+        inserted_count: error.result?.insertedCount || 0,
+        errors: error.writeErrors.map(e => ({
+          index: e.index,
+          code: e.code,
+          message: e.errmsg
+        }))
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to add products',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
+ * PUT /api/voiceflow/update-product
+ * Update an existing product by Reference
+ */
+app.put('/api/voiceflow/update-product', async (req, res) => {
+  try {
+    const { reference, ...updateData } = req.body;
+
+    if (!reference) {
+      return res.status(400).json({
+        success: false,
+        message: 'Reference is required',
+        error: 'Missing required field: reference'
+      });
+    }
+
+    // Connect to MongoDB
+    let db, collection;
+    try {
+      const connection = await connectToDatabase();
+      db = connection.db;
+      collection = db.collection(COLLECTION_NAME);
+    } catch (connectionError) {
+      console.error('MongoDB connection failed:', connectionError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to connect to database',
+        error: process.env.NODE_ENV === 'development' ? connectionError.message : undefined
+      });
+    }
+
+    // Update product
+    const result = await collection.updateOne(
+      { Reference: reference },
+      { $set: updateData }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Product with Reference "${reference}" not found`,
+        error: 'Product not found'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Product updated successfully',
+      reference: reference,
+      modified_count: result.modifiedCount
+    });
+
+  } catch (error) {
+    console.error('Error updating product:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update product',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+/**
+ * DELETE /api/voiceflow/delete-product
+ * Delete a product by Reference
+ */
+app.delete('/api/voiceflow/delete-product', async (req, res) => {
+  try {
+    const { reference } = req.body;
+
+    if (!reference) {
+      return res.status(400).json({
+        success: false,
+        message: 'Reference is required',
+        error: 'Missing required field: reference'
+      });
+    }
+
+    // Connect to MongoDB
+    let db, collection;
+    try {
+      const connection = await connectToDatabase();
+      db = connection.db;
+      collection = db.collection(COLLECTION_NAME);
+    } catch (connectionError) {
+      console.error('MongoDB connection failed:', connectionError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to connect to database',
+        error: process.env.NODE_ENV === 'development' ? connectionError.message : undefined
+      });
+    }
+
+    // Delete product
+    const result = await collection.deleteOne({ Reference: reference });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `Product with Reference "${reference}" not found`,
+        error: 'Product not found'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Product deleted successfully',
+      reference: reference
+    });
+
+  } catch (error) {
+    console.error('Error deleting product:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete product',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+});
+
+// Health check endpoint with MongoDB connection test
+app.get('/api/voiceflow/search', async (req, res) => {
+  const health = {
     status: 'ok',
     message: 'Voiceflow-MongoDB Search API is running',
+    timestamp: new Date().toISOString(),
     endpoints: {
       search: 'POST /api/voiceflow/search',
-      browse: 'POST /api/voiceflow/browse'
+      browse: 'POST /api/voiceflow/browse',
+      smart_search: 'POST /api/voiceflow/smart-search',
+      add_product: 'POST /api/voiceflow/add-product',
+      add_products: 'POST /api/voiceflow/add-products',
+      update_product: 'PUT /api/voiceflow/update-product',
+      delete_product: 'DELETE /api/voiceflow/delete-product'
+    },
+    mongodb: {
+      connected: false,
+      database: DB_NAME,
+      collection: COLLECTION_NAME,
+      searchIndex: SEARCH_INDEX_NAME
     }
-  });
+  };
+
+  // Test MongoDB connection
+  try {
+    const { db } = await connectToDatabase();
+    const collection = db.collection(COLLECTION_NAME);
+    
+    // Count total documents in collection
+    const count = await collection.countDocuments({});
+    
+    health.mongodb.connected = true;
+    health.mongodb.documentCount = count;
+    health.mongodb.status = 'connected';
+    
+    res.status(200).json(health);
+  } catch (error) {
+    health.status = 'degraded';
+    health.mongodb.connected = false;
+    health.mongodb.status = 'disconnected';
+    health.mongodb.error = process.env.NODE_ENV === 'development' ? error.message : 'Connection failed';
+    
+    res.status(503).json(health);
+  }
 });
 
 // Export the Express app for Vercel

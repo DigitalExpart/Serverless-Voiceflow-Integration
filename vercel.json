@@ -8,7 +8,7 @@
   ],
   "routes": [
     {
-      "src": "/api/voiceflow/(search|browse)",
+      "src": "/api/voiceflow/(search|browse|smart-search|add-product|add-products|update-product|delete-product)",
       "dest": "/api/voiceflow/search.js"
     }
   ],
