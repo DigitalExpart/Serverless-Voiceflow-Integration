@@ -413,7 +413,7 @@ app.post('/api/voiceflow/search', async (req, res) => {
     const { db } = await connectToDatabase();
     const collection = db.collection(COLLECTION_NAME);
 
-    // MongoDB Atlas Search aggregation pipeline
+    // MongoDB Atlas Search aggregation pipeline - Return ALL fields
     const searchPipeline = [
       {
         $search: {
@@ -427,16 +427,13 @@ app.post('/api/voiceflow/search', async (req, res) => {
         }
       },
       {
-        $project: {
-          _id: 0,
-          Reference: 1,
-          Designation: 1,
-          Description: 1,
-          Marque: 1,
-          'Categorie racine': 1,
-          'Sous-categorie 1': 1,
-          'Reference du fabricant': 1,
+        $addFields: {
           score: { $meta: 'searchScore' }
+        }
+      },
+      {
+        $project: {
+          _id: 0  // Only exclude MongoDB _id, include everything else
         }
       }
     ];
@@ -487,18 +484,7 @@ app.post('/api/voiceflow/search', async (req, res) => {
       count: count,
       message: `${count} produit${count > 1 ? 's' : ''} trouvé${count > 1 ? 's' : ''}`,
       query: query,
-      results: results.map(product => ({
-        reference: product.Reference,
-        designation: product.Designation,
-        description: product.Description,
-        marque: product.Marque,
-        categorie: product['Categorie racine'],
-        sous_categorie: product['Sous-categorie 1'],
-        sous_categorie_2: product['Sous-categorie 2'],
-        sous_categorie_3: product['Sous-categorie 3'],
-        reference_fabricant: product['Reference du fabricant'],
-        score: product.score
-      })),
+      results: results,  // Return complete documents with ALL fields
       metadata: {
         search_performed: true,
         timestamp: new Date().toISOString(),
@@ -1064,19 +1050,12 @@ app.post('/api/voiceflow/browse', async (req, res) => {
     // Get products with optional filtering - NO LIMIT
     const resultLimit = parseInt(limit) || 999999;
     
+    // Build pipeline - Return ALL fields from database
     const pipeline = [
       ...(Object.keys(matchCriteria).length > 0 ? [{ $match: matchCriteria }] : []),
       {
         $project: {
-          _id: 0,
-          Reference: 1,
-          Designation: 1,
-          Description: 1,
-          Marque: 1,
-          'Categorie racine': 1,
-          'Sous-categorie 1': 1,
-          'Sous-categorie 2': 1,
-          'Reference du fabricant': 1
+          _id: 0  // Only exclude MongoDB _id, include everything else
         }
       }
     ];
@@ -1141,16 +1120,7 @@ app.post('/api/voiceflow/browse', async (req, res) => {
       },
       available_categories: categoryStats.map(c => ({ name: c._id, count: c.count })),
       available_brands: brandStats.map(b => ({ name: b._id, count: b.count })),
-      results: allProducts.map(product => ({
-        reference: product.Reference,
-        designation: product.Designation,
-        description: product.Description,
-        marque: product.Marque,
-        categorie: product['Categorie racine'],
-        sous_categorie: product['Sous-categorie 1'],
-        sous_categorie_2: product['Sous-categorie 2'],
-        reference_fabricant: product['Reference du fabricant']
-      })),
+      results: allProducts,  // Return complete documents with ALL fields
       metadata: {
         total_categories: categoryStats.length,
         total_brands: brandStats.length,
