@@ -464,32 +464,29 @@ app.post('/api/voiceflow/search', async (req, res) => {
       throw searchError; // Re-throw to be caught by outer catch
     }
 
-    // Format response for Voiceflow
-    if (results.length === 0) {
+    // Format response for Voiceflow - Return ALL results for AI to process
+    const count = results.length;
+    
+    if (count === 0) {
       return res.status(200).json({
-        speech: `Je n'ai trouvé aucun produit correspondant à "${query}". Veuillez essayer un autre terme de recherche.`,
-        results: []
+        success: true,
+        count: 0,
+        message: `Aucun produit trouvé pour "${query}"`,
+        query: query,
+        results: [],
+        metadata: {
+          search_performed: true,
+          timestamp: new Date().toISOString()
+        }
       });
     }
 
-    // Build speech output
-    const count = results.length;
-    let speech;
-    
-    if (count <= 10) {
-      // For 10 or fewer results, list them
-      const productNames = results.map(product => product.Designation || product.Reference || 'Produit sans nom');
-      speech = `J'ai trouvé ${count} produit${count > 1 ? 's' : ''}: ${productNames.join(', ')}.`;
-    } else {
-      // For more than 10 results, just give the count
-      speech = `J'ai trouvé ${count} produit${count > 1 ? 's' : ''} correspondant à votre recherche. Vous pouvez affiner votre recherche ou parcourir les résultats.`;
-    }
-    
-    // Add prompt for follow-up questions to encourage continuous conversation
-    speech += ` Que souhaitez-vous savoir d'autre sur ces produits, ou voulez-vous chercher autre chose?`;
-
+    // Return ALL results without filtering - Let Voiceflow AI handle the data
     return res.status(200).json({
-      speech,
+      success: true,
+      count: count,
+      message: `${count} produit${count > 1 ? 's' : ''} trouvé${count > 1 ? 's' : ''}`,
+      query: query,
       results: results.map(product => ({
         reference: product.Reference,
         designation: product.Designation,
@@ -497,9 +494,16 @@ app.post('/api/voiceflow/search', async (req, res) => {
         marque: product.Marque,
         categorie: product['Categorie racine'],
         sous_categorie: product['Sous-categorie 1'],
+        sous_categorie_2: product['Sous-categorie 2'],
+        sous_categorie_3: product['Sous-categorie 3'],
         reference_fabricant: product['Reference du fabricant'],
         score: product.score
-      }))
+      })),
+      metadata: {
+        search_performed: true,
+        timestamp: new Date().toISOString(),
+        total_results: count
+      }
     });
 
   } catch (error) {
@@ -1113,45 +1117,45 @@ app.post('/api/voiceflow/browse', async (req, res) => {
       });
     }
 
-    // Get all products (shuffled for variety)
-    const topProducts = allProducts
-      .sort(() => 0.5 - Math.random());
-
-    // Build speech
+    // Return ALL products for AI to process
     const totalCount = allProducts.length;
-    let speech = '';
+    let message = '';
     
     if (category && brand) {
-      speech = `J'ai trouvé ${totalCount} produits ${brand} dans la catégorie ${category}. Voici mes 5 recommandations.`;
+      message = `${totalCount} produits ${brand} dans ${category}`;
     } else if (category) {
-      speech = `J'ai trouvé ${totalCount} produits dans la catégorie ${category}. Voici mes 5 meilleures recommandations.`;
+      message = `${totalCount} produits dans ${category}`;
     } else if (brand) {
-      speech = `J'ai trouvé ${totalCount} produits de la marque ${brand}. Voici mes 5 meilleures recommandations.`;
+      message = `${totalCount} produits de ${brand}`;
     } else {
-      speech = `Catalogue complet: ${totalCount} produits disponibles. Voici 5 produits recommandés parmi ${categoryStats.length} catégories et ${brandStats.length} marques.`;
+      message = `${totalCount} produits disponibles`;
     }
 
     return res.status(200).json({
-      speech,
-      total_products: totalCount,
-      categories: categoryStats.map(c => ({ name: c._id, count: c.count })),
-      brands: brandStats.map(b => ({ name: b._id, count: b.count })),
-      top_5_recommendations: topProducts.map(product => ({
+      success: true,
+      message,
+      count: totalCount,
+      filters: {
+        category: category || null,
+        brand: brand || null
+      },
+      available_categories: categoryStats.map(c => ({ name: c._id, count: c.count })),
+      available_brands: brandStats.map(b => ({ name: b._id, count: b.count })),
+      results: allProducts.map(product => ({
         reference: product.Reference,
         designation: product.Designation,
         description: product.Description,
         marque: product.Marque,
         categorie: product['Categorie racine'],
-        sous_categorie: product['Sous-categorie 1']
+        sous_categorie: product['Sous-categorie 1'],
+        sous_categorie_2: product['Sous-categorie 2'],
+        reference_fabricant: product['Reference du fabricant']
       })),
-      all_products: allProducts.map(product => ({
-        reference: product.Reference,
-        designation: product.Designation,
-        description: product.Description,
-        marque: product.Marque,
-        categorie: product['Categorie racine'],
-        sous_categorie: product['Sous-categorie 1']
-      }))
+      metadata: {
+        total_categories: categoryStats.length,
+        total_brands: brandStats.length,
+        timestamp: new Date().toISOString()
+      }
     });
 
   } catch (error) {
