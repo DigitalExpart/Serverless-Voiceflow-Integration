@@ -495,14 +495,41 @@ app.post('/api/voiceflow/search', async (req, res) => {
   } catch (error) {
     console.error('Error processing search request:', {
       message: error.message,
-      stack: error.stack
+      stack: error.stack,
+      errorType: error.constructor.name
     });
 
-    // Return friendly error message to Voiceflow
+    // Check for specific error types and provide helpful messages
+    let errorMessage = 'Désolé, j\'ai rencontré une erreur lors de la recherche.';
+    let diagnosticInfo = null;
+
+    if (error.message && error.message.includes('MONGO_URI')) {
+      errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. La configuration de connexion est manquante.';
+      diagnosticInfo = 'MONGO_URI environment variable not configured';
+    } else if (error.message && error.message.includes('DB_NAME')) {
+      errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Le nom de la base de données n\'est pas configuré.';
+      diagnosticInfo = 'DB_NAME environment variable not configured';
+    } else if (error.message && error.message.includes('Failed to connect')) {
+      errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Il semble y avoir un problème de connexion temporaire.';
+      diagnosticInfo = 'MongoDB connection failed - check network access and credentials';
+    } else if (error.message && (error.message.includes('timeout') || error.message.includes('ENOTFOUND'))) {
+      errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Le serveur ne répond pas.';
+      diagnosticInfo = 'Connection timeout - check MongoDB Atlas network access settings';
+    } else if (error.message && error.message.includes('authentication')) {
+      errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Problème d\'authentification.';
+      diagnosticInfo = 'Authentication failed - check username and password in MONGO_URI';
+    }
+
+    // Return friendly error message to Voiceflow with diagnostic info in development
     return res.status(500).json({
-      speech: `Désolé, j'ai rencontré une erreur lors de la recherche${error?.message ? ` : ${error.message}` : ''}. Veuillez réessayer plus tard.`,
+      speech: errorMessage,
       results: [],
-      error: error?.message
+      error: process.env.NODE_ENV === 'development' ? (diagnosticInfo || error?.message) : undefined,
+      diagnostic: process.env.NODE_ENV === 'development' ? {
+        type: error.constructor.name,
+        message: error.message,
+        hint: diagnosticInfo
+      } : undefined
     });
   }
 });
@@ -607,11 +634,36 @@ app.post('/api/voiceflow/smart-search', async (req, res) => {
         db = connection.db;
         collection = db.collection(COLLECTION_NAME);
       } catch (connectionError) {
-        console.error('MongoDB connection failed:', connectionError);
+        console.error('MongoDB connection failed:', {
+          message: connectionError.message,
+          stack: connectionError.stack,
+          errorType: connectionError.constructor.name
+        });
+        
+        // Provide more specific error messages
+        let errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Veuillez réessayer plus tard.';
+        let diagnosticInfo = connectionError.message;
+        
+        if (connectionError.message && connectionError.message.includes('MONGO_URI')) {
+          errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. La configuration de connexion est manquante.';
+          diagnosticInfo = 'MONGO_URI environment variable not configured in Vercel';
+        } else if (connectionError.message && connectionError.message.includes('timeout')) {
+          errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Le serveur ne répond pas.';
+          diagnosticInfo = 'Connection timeout - check MongoDB Atlas Network Access allows Vercel IPs (0.0.0.0/0)';
+        } else if (connectionError.message && connectionError.message.includes('authentication')) {
+          errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Problème d\'authentification.';
+          diagnosticInfo = 'Authentication failed - verify username and password in MONGO_URI';
+        }
+        
         return res.status(500).json({
-          speech: 'Désolé, je ne peux pas me connecter à la base de données. Veuillez réessayer plus tard.',
+          speech: errorMessage,
           results: [],
-          error: process.env.NODE_ENV === 'development' ? connectionError.message : undefined
+          error: process.env.NODE_ENV === 'development' ? diagnosticInfo : undefined,
+          diagnostic: process.env.NODE_ENV === 'development' ? {
+            type: 'ConnectionError',
+            message: connectionError.message,
+            hint: 'Check Vercel environment variables: MONGO_URI, DB_NAME, COLLECTION_NAME'
+          } : undefined
         });
       }
 
@@ -656,11 +708,36 @@ app.post('/api/voiceflow/smart-search', async (req, res) => {
         db = connection.db;
         collection = db.collection(COLLECTION_NAME);
       } catch (connectionError) {
-        console.error('MongoDB connection failed:', connectionError);
+        console.error('MongoDB connection failed:', {
+          message: connectionError.message,
+          stack: connectionError.stack,
+          errorType: connectionError.constructor.name
+        });
+        
+        // Provide more specific error messages
+        let errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Veuillez réessayer plus tard.';
+        let diagnosticInfo = connectionError.message;
+        
+        if (connectionError.message && connectionError.message.includes('MONGO_URI')) {
+          errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. La configuration de connexion est manquante.';
+          diagnosticInfo = 'MONGO_URI environment variable not configured in Vercel';
+        } else if (connectionError.message && connectionError.message.includes('timeout')) {
+          errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Le serveur ne répond pas.';
+          diagnosticInfo = 'Connection timeout - check MongoDB Atlas Network Access allows Vercel IPs (0.0.0.0/0)';
+        } else if (connectionError.message && connectionError.message.includes('authentication')) {
+          errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Problème d\'authentification.';
+          diagnosticInfo = 'Authentication failed - verify username and password in MONGO_URI';
+        }
+        
         return res.status(500).json({
-          speech: 'Désolé, je ne peux pas me connecter à la base de données. Veuillez réessayer plus tard.',
+          speech: errorMessage,
           results: [],
-          error: process.env.NODE_ENV === 'development' ? connectionError.message : undefined
+          error: process.env.NODE_ENV === 'development' ? diagnosticInfo : undefined,
+          diagnostic: process.env.NODE_ENV === 'development' ? {
+            type: 'ConnectionError',
+            message: connectionError.message,
+            hint: 'Check Vercel environment variables: MONGO_URI, DB_NAME, COLLECTION_NAME'
+          } : undefined
         });
       }
 
@@ -710,11 +787,36 @@ app.post('/api/voiceflow/smart-search', async (req, res) => {
         db = connection.db;
         collection = db.collection(COLLECTION_NAME);
       } catch (connectionError) {
-        console.error('MongoDB connection failed:', connectionError);
+        console.error('MongoDB connection failed:', {
+          message: connectionError.message,
+          stack: connectionError.stack,
+          errorType: connectionError.constructor.name
+        });
+        
+        // Provide more specific error messages
+        let errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Veuillez réessayer plus tard.';
+        let diagnosticInfo = connectionError.message;
+        
+        if (connectionError.message && connectionError.message.includes('MONGO_URI')) {
+          errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. La configuration de connexion est manquante.';
+          diagnosticInfo = 'MONGO_URI environment variable not configured in Vercel';
+        } else if (connectionError.message && connectionError.message.includes('timeout')) {
+          errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Le serveur ne répond pas.';
+          diagnosticInfo = 'Connection timeout - check MongoDB Atlas Network Access allows Vercel IPs (0.0.0.0/0)';
+        } else if (connectionError.message && connectionError.message.includes('authentication')) {
+          errorMessage = 'Désolé, je ne peux pas me connecter à la base de données. Problème d\'authentification.';
+          diagnosticInfo = 'Authentication failed - verify username and password in MONGO_URI';
+        }
+        
         return res.status(500).json({
-          speech: 'Désolé, je ne peux pas me connecter à la base de données. Veuillez réessayer plus tard.',
+          speech: errorMessage,
           results: [],
-          error: process.env.NODE_ENV === 'development' ? connectionError.message : undefined
+          error: process.env.NODE_ENV === 'development' ? diagnosticInfo : undefined,
+          diagnostic: process.env.NODE_ENV === 'development' ? {
+            type: 'ConnectionError',
+            message: connectionError.message,
+            hint: 'Check Vercel environment variables: MONGO_URI, DB_NAME, COLLECTION_NAME'
+          } : undefined
         });
       }
       
